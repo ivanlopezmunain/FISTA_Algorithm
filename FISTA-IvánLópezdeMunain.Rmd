@@ -1,0 +1,267 @@
+---
+title: "FISTA"
+author: "Iván López de Munain Quintana"
+date: "8 de marzo de 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introducción.
+
+Como bien sabemos, el algortimo FISTA (Fast Iterative-Thresholding Algorithm) se trata de una mejora del procedimiento ISTA. Dicha mejora se basa en aumentar la velocidad de convergencia que pasa de $O(1/n)$ a $O(1/n^2$). 
+Con FISTA se busca resolver el siguiente problema de optimización general:
+
+$$X = argmin_x (f(x)+g(x)) $$
+en donde:
+
+
+$g:R^n->R$ es una función continua convexa (probablemente no suave).
+
+
+$f:R^n->R$ es una función suave y convexa.
+
+
+Cabe recordar que $f(X)$ es suave si:
+
+$$ || \nabla f(x) - \nabla f(y) || \le \beta ||x-y||  $$
+Antes de comenzar con la implementación del algoritmo vamos a simular los datos que nos van a servir para poner a prueba el funcionamiento medido mediante el tiempo real e iteraciones. Como se puede observar la simulación se basa en generar una matriz de dimensiones p$x$n que siguen una distribución $N(0,1)$, después generamos aleatoriamente mediante `runif`el vector $\beta_0$ (que en un caso real lo desconoceríamos) y obtenemos el vector de la variable de interés mediante:
+
+$$Y=XB+\epsilon$$
+
+
+```{r simulacion, echo=TRUE}
+
+rYX<-function(p,n,b0){        #función para generar X e Y, Y=X*B + error
+  epsilon<-rnorm(n)
+  X<-matrix(rnorm(p*n),ncol=p)
+  Y<-X%*%b0+epsilon
+  return(cbind(Y,X))
+}
+
+p<-10                               #numero de variables
+n<-100                              #numero de observaciones
+b0<-runif(p,0,5)                    #beta real que desconocemos
+datos<-rYX(p,n,b0)                  #la simulación la almacenamos en datos
+
+```
+
+## FISTA para la regresión Lasso
+
+
+La regresión Lasso se caracteriza por hacer una selección automática de las variables y estimar los parámetros $\beta$ de la siguiente forma:
+
+
+$$ \hat\beta_{n,\lambda}=argmin_{\mathbb{R}^p}||Y-X\beta||^2_2+\lambda||\beta||_1 $$
+
+Aquí nos surge el problema de seleccionar $\lambda$ porque controla la complejidad del modelo ya que a mayores valores aumenta más la flexibilidad. Este aumento de flexibilidad se traduce en una mayor capacidad de adaptación a la muestra de interés pero también supone el riesgo de existencia de sobreajuste. Hay que tener en cuenta que el $\lambda$ apropiado depende de parámetros desconocidos por lo que se suele usar validación cruzada para estimarlo. 
+Una vez recordado las ideas principales de la regresión Lasso y simulados los datos vamos a desarrollar el algoritmo FISTA. A continuación se va a mostrar las fórmulas sobre las que se basa dicho algoritmo:
+
+
+$$ \lambda_0 =0,\lambda_n=\frac{1+\sqrt{1+4\lambda^2_{n-1}}}2$$
+$$ \gamma_n=\frac{(1-\lambda_n)}{(\lambda_n+1)} $$
+Siendo $x_1=y_1$ arbitrario:
+
+$$ y_{n+1}=argmin_x[g(x)+\frac\beta2||x-(x_n-\frac{1}\beta\nabla f(x_n))||^2]$$
+$$ x_{n+1}=(1-\gamma_n)y_{n+1}+\gamma_ny_n  $$
+
+
+Cabe recordar que $g(x)=\lambda||x||_1$ y $f(x)=||Y-XB||^2$.Además para calcular $\beta$-suave o la constante de Lipschitz se tiene que calcular el autovalor máximo de $X^tX$. A partir de todas estas fórmulas se deduce el siguiente teorema por el que vemos que la velocidad de convergencia de este algoritmo es O(1/$n^2$):
+
+
+$$ (f(x_n)+g(x_n))-(f(\hat x)-g(\hat x))\le \frac{2\beta}n^2 ||x_1-\hat x||^2  $$
+
+En el siguiente código se muestran las funciones que he implementado para calcular el gradiente ($\nabla f(X)=X^tX\beta + X^TY$) y la proyección de los datos. Dichas funciones se llaman `gradiente`y `proyeccion`.
+
+
+```{r gradiente, echo=TRUE}
+  
+#cálculo del gradiente
+gradiente<-function(XtX,XtY,beta){
+  return(XtX%*%beta-XtY)
+}
+
+#calculo de la proyeccion
+proyeccion<-function(U,lambda,p){
+  return (U-matrix(rep(lambda,p),p,1))
+}
+
+```
+
+
+Por último se ha implentado la función `FISTA`que tiene como argumento los datos que se pretenden estudiar. En este procedimiento primero se calculan las traspuestas $X^tX$ y $X^tY$, la constante de Lipschitz y se inicializan los distintos parámetros que van a ir actualizándose en la etapa iterativa.
+Cabe destacar que se dispone de una variable denominada `error` que sirve como criterio de convergencia para salir del bucle (esta fijada a un orden de $10^{-10}$ para que termine el algoritmo).
+
+
+```{r algoritmo, echo=TRUE}
+
+#argumentos los datos y su parametro de penalización obtenida mediante validación #cruzada
+FISTA<-function(datos,l){
+    error<-999                      #error para determinar cuando converge
+    iter<-0
+    Y<-datos[,1]                    #variable de interés
+    X<-datos[,2:ncol(datos)]        #conjunto de variables explicativas
+    XtX<-t(X)%*%X
+    XtY<-t(X)%*%Y
+    L<-max(eigen(XtX)$values)       #cte Lipschitz (beta-suave)
+    x_inicial<-rep(0,ncol(X))       #x e y nos sirven para ir actualizando los betas en cada iteración
+    x_anterior<-x_inicial
+    y_anterior<-x_inicial
+    lambda_anterior<-1              #lambda inicial igual a uno
+    
+    while(error>10^-10){
+      
+      #cálculos
+      
+      intermedio<-gradiente(XtX,XtY,y_anterior)/L
+      x_actual<-proyeccion(y_anterior-intermedio,l,ncol(X))
+      lambda_actual<-(1+sqrt(1+4*lambda_anterior^2))/2
+      y_actual<-x_actual+(lambda_anterior-1)/lambda_actual*(x_actual-x_anterior)
+      
+      #actualizaciones de los betas, lambda y error
+      
+      error<-mean((y_actual-y_anterior)^2)
+      
+      lambda_anterior<-lambda_actual
+      y_anterior<-y_actual
+      x_anterior<-x_actual
+      
+      
+      iter<-iter+1
+    }
+    
+    #devolución de los betas estimados y las iteraciones necesarias
+    return(c(y_actual,iter))
+
+}
+
+#librarias necesarias
+library(foreach)
+library(Matrix)
+library(glmnet)
+
+
+#libreria para obtener tablas
+library(knitr)
+
+#betas y Niter estimados mediante FISTA
+Y<-datos[,1]                   
+X<-datos[,2:ncol(datos)]
+tiempoFISTA<-Sys.time()
+betaFISTA<-FISTA(datos,0.01)
+Niter<-betaFISTA[ncol(datos)]
+betaFISTA<-betaFISTA[1:(ncol(datos)-1)]
+tiempoFISTA<-Sys.time()-tiempoFISTA
+
+#betas estimados mediante el proc glmnet
+Y<-datos[,1]                    
+X<-datos[,2:ncol(datos)]
+tiempoGLMNET<-Sys.time()
+l.opt<-cv.glmnet(X,Y,family="gaussian",alpha=1,intercept=FALSE)$lambda.min
+betaGLMNET<-glmnet(X,Y,family="gaussian",alpha=1,intercept=FALSE,lambda=l.opt)$beta
+tiempoGLMNET<-Sys.time()-tiempoGLMNET
+
+#tabla comparativa
+tabla<-cbind(b0,betaFISTA,betaGLMNET)
+tabla<-rbind(tabla, c(0,tiempoFISTA,tiempoGLMNET),c(0,round(Niter),0))
+colnames(tabla)<-c("b0","betaFISTA","betaGLMNET")
+nombres<-rep(NA,ncol(X))
+for(i in 1:ncol(X)){
+  nombres[i]<-sprintf("Beta%d",i)
+}
+
+rownames(tabla)<-c(nombres,"Tiempo(s)","Iteraciones")
+
+kable(as.matrix(tabla))
+
+
+```
+
+
+En la tabla anterior, que es un ejemplo para $p=10$ y $n=100$, podemos ver como tanto FISTA como el procedimiento usado en `glmnet` son bastante buenos, además se puede observar que la mayoría de las veces el algoritmo FISTA es un poco más rápido porque no he tenido en cuenta el tiempo para obtener el parámetro de penalización mediante `cross-validation`. Para hacer una mejor comparación vamos a calcular la estimación del error de predicción para cada uno:
+
+
+$$\textstyle \frac 1 n \|Y-X\hat{\beta}_{\mbox{glmnet}}\|^2,$$
+
+$$\textstyle \frac 1 n \|Y-X\hat{\beta}_{\mbox{fista}}\|^2,$$
+
+que calculamos con las siguientes líneas de código.
+
+
+```{r errorprediccion, include=TRUE}
+err.predGLMNET<-mean((Y-X%*%betaGLMNET)^2)
+err.predFISTA<-mean((Y-X%*%betaFISTA)^2)
+errores<-cbind(err.predFISTA,err.predGLMNET)
+colnames(errores)<-c("FISTA","GLMNET")
+rownames(errores)<-c("Err.pred")
+kable(as.matrix(errores))
+```
+
+
+Viendo los resultados anteriores se concluye que es mejor solución la conseguida por FISTA que la que obtendríamos con el procedimiento de R `glmnet`. Una vez realizadas dichas comparaciones vamos a estudiar solo el funcionamiento del algoritmo FISTA cuando aumentamos tanto  el número de variables `p` como el número de observaciones `n`.
+Como ya hemos visto que es un método con el que se obtienen buenos resultados el estudio se va a centrar en el tiempo de ejecución y las iteraciones necesarias hasta la consecución de la convergencia:
+
+
+```{r tiempoEjecucion, include=TRUE}
+
+#número de parámetros y observaciones
+pi<-c(10,20,50,70,100)
+ni<-c(200,500,1000,5000,10000,100000)
+
+tiempo<-matrix(rep(0,length(ni)*length(pi)),ncol = length(ni), byrow=T)
+iteraciones<-matrix(rep(0,length(ni)*length(pi)),ncol = length(ni), byrow=T)
+
+#para almacenar los nombres de las tablas
+nomCol<-rep(NA,length(ni))
+nomRow<-rep(NA,length(pi))
+
+#bucle iterativo para estudiar las distintas réplicas
+for(i in 1:length(pi)){
+  
+  nomRow[i]<-sprintf("p=%d",pi[i])
+  
+  for(j in 1:length(ni)){
+    
+    nomCol[j]<-sprintf("n=%d",ni[j])
+    
+    #generamos los datos con un determinado n y p
+    datos1<-rYX(pi[i],ni[j],runif(pi[i],0,5))
+    Y<-datos1[,1]                    
+    X<-datos1[,2:ncol(datos1)]
+    
+    #l parametro de penalizacion obtenido mediante validación cruzada
+    #lo considero fuera del tiempo del algoritmo
+    l<-cv.glmnet(X,Y,family="gaussian",alpha=1,intercept=FALSE)$lambda.min 
+    
+    #comenzamos a medir el tiempo
+    tiempo1<-Sys.time()
+    
+    #realizamos FISTA
+    a<-FISTA(datos1,l)
+    
+    #solo nos interesa el tiempo y las iteraciones
+    tiempo[i,j]<-Sys.time()-tiempo1
+    iteraciones[i,j]<-a[ncol(datos1)]
+  }
+}
+
+colnames(tiempo)<-c(nomCol)
+rownames(tiempo)<-c(nomRow)
+kable(as.matrix(tiempo))
+
+```
+
+
+La tabla superior indica los tiempos requeridos para distintos números de variables y de observaciones. Se puede ver que pese al alto número de covariables e instancias no se dispara el tiempo de ejecución. Como era de esperar el mayor tiempo se obtiene con la situación con mayor `p`y mayor `n`. En la siguiente tabla se muestra el número de iteraciones necesarias para conseguir la convergencia con el algoritmo de FISTA (poniendo la cota de convergencia en un error menor a $10^{-10}$):
+
+```{r Niteraciones, include=TRUE}
+
+colnames(iteraciones)<-c(nomCol)
+rownames(iteraciones)<-c(nomRow)
+kable(as.matrix(iteraciones))
+
+```
+
+Se puede observar que el algoritmo FISTA tiene mayores problemas cuando el número de variables es próximo al número de observaciones, mientras que cuando ocurre la situacion de $n>>>p$ se requieren un número menor de iteraciones (como era de esperar). Mediante estos resultados podemos concluir que si fijamos `n` al aumentar el `p`aumenta tanto el número de iteraciones como el tiempo de ejecución, mientras que para un `p`fijo si aumentamos `n`aumenta el tiempo de ejecución pero disminuye el número de iteraciones (esto es debido a que estamos aumentando el número de observaciones que estamos estudiando por lo que hay mayor información).
